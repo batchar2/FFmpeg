@@ -411,6 +411,8 @@ static void register_all(void)
     /* multimedia sources */
     REGISTER_FILTER(AMOVIE,         amovie,         avsrc);
     REGISTER_FILTER(MOVIE,          movie,          avsrc);
+    /* Add colorbar filter */
+    REGISTER_FILTER(COLORBAR,     colorbar,     vf);
 
     /* those filters are part of public or internal API => registered
      * unconditionally */
