@@ -25,8 +25,14 @@
  * @see https://en.wikipedia.org/wiki/Canny_edge_detector
  */
 
-#include "libavutil/avassert.h"
+#include <cv.h>
+#include <highgui.h>
+
 #include "libavutil/opt.h"
+#include "libavutil/pixfmt.h"
+#include "libavutil/avassert.h"
+
+
 #include "avfilter.h"
 #include "formats.h"
 #include "internal.h"
@@ -44,17 +50,21 @@ struct plane_info {
     char     *directions;
 };
 
+/** Контекст исполнения, на него вешаются опции */
 typedef struct ColorbarContext {
     const AVClass *class;
-    struct plane_info planes[3];
-    int nb_planes;
-    double   low, high;
-    uint8_t  low_u8, high_u8;
-    int mode;
+    char *colorbar_file;
+    char *method;
+    //struct plane_info planes[3];
+    //int nb_planes;
+    //double   low, high;
+    //uint8_t  low_u8, high_u8;
+    //int mode;
 } ColorbarContext;
 
 #define OFFSET(x) offsetof(ColorbarContext, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
+/*
 static const AVOption colorbar_options[] = {
     { "high", "set high threshold", OFFSET(high), AV_OPT_TYPE_DOUBLE, {.dbl=50/255.}, 0, 1, FLAGS },
     { "low",  "set low threshold",  OFFSET(low),  AV_OPT_TYPE_DOUBLE, {.dbl=20/255.}, 0, 1, FLAGS },
@@ -63,41 +73,53 @@ static const AVOption colorbar_options[] = {
         { "colormix", "mix colors",                 0, AV_OPT_TYPE_CONST, {.i64=MODE_COLORMIX}, INT_MIN, INT_MAX, FLAGS, "mode" },
     { NULL }
 };
+*/
+static const AVOption colorbar_options[] = {
+   {"colorbar", "path to colorbars", offsetof(ColorbarContext, colorbar_file), AV_OPT_TYPE_STRING},
+   {"method", "math method", offsetof(ColorbarContext, method), AV_OPT_TYPE_STRING},
+   {NULL}
+   /*
+   { "high", "set high threshold", OFFSET(high), AV_OPT_TYPE_DOUBLE, {.dbl=50/255.}, 0, 1, FLAGS },
+    { "low",  "set low threshold",  OFFSET(low),  AV_OPT_TYPE_DOUBLE, {.dbl=20/255.}, 0, 1, FLAGS },
+    { "mode", "set mode", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=MODE_WIRES}, 0, NB_MODE-1, FLAGS, "mode" },
+        { "wires",    "white/gray wires on black",  0, AV_OPT_TYPE_CONST, {.i64=MODE_WIRES},    INT_MIN, INT_MAX, FLAGS, "mode" },
+        { "colormix", "mix colors",                 0, AV_OPT_TYPE_CONST, {.i64=MODE_COLORMIX}, INT_MIN, INT_MAX, FLAGS, "mode" },
+    { NULL }
+    */
+};
 
 AVFILTER_DEFINE_CLASS(colorbar);
 
 static av_cold int init(AVFilterContext *ctx)
 {
+
+    av_log(NULL, AV_LOG_ERROR, "HELLO, World! Init\n");
+    /*
     ColorbarContext *colorbar = ctx->priv;
 
     colorbar->low_u8  = colorbar->low  * 255. + .5;
     colorbar->high_u8 = colorbar->high * 255. + .5;
+    */
     return 0;
 }
 
 static int query_formats(AVFilterContext *ctx)
 {
     const ColorbarContext *colorbar = ctx->priv;
-    static const enum AVPixelFormat wires_pix_fmts[] = {AV_PIX_FMT_GRAY8, AV_PIX_FMT_NONE};
-    static const enum AVPixelFormat colormix_pix_fmts[] = {AV_PIX_FMT_GBRP, AV_PIX_FMT_GRAY8, AV_PIX_FMT_NONE};
-    AVFilterFormats *fmts_list;
-    const enum AVPixelFormat *pix_fmts = NULL;
+    static const enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_BGR24, AV_PIX_FMT_NONE};
+    AVFilterFormats *fmts_list = NULL;
 
-    if (colorbar->mode == MODE_WIRES) {
-        pix_fmts = wires_pix_fmts;
-    } else if (colorbar->mode == MODE_COLORMIX) {
-        pix_fmts = colormix_pix_fmts;
-    } else {
-        av_assert0(0);
-    }
     fmts_list = ff_make_format_list(pix_fmts);
     if (!fmts_list)
         return AVERROR(ENOMEM);
     return ff_set_common_formats(ctx, fmts_list);
+
 }
+
 
 static int config_props(AVFilterLink *inlink)
 {
+    /*
     int p;
     AVFilterContext *ctx = inlink->dst;
     ColorbarContext *colorbar = ctx->priv;
@@ -112,49 +134,10 @@ static int config_props(AVFilterLink *inlink)
         if (!plane->tmpbuf || !plane->gradients || !plane->directions)
             return AVERROR(ENOMEM);
     }
+    */
     return 0;
 }
 
-static void gaussian_blur(AVFilterContext *ctx, int w, int h,
-                                uint8_t *dst, int dst_linesize,
-                          const uint8_t *src, int src_linesize)
-{
-    int i, j;
-
-    memcpy(dst, src, w); dst += dst_linesize; src += src_linesize;
-    memcpy(dst, src, w); dst += dst_linesize; src += src_linesize;
-    for (j = 2; j < h - 2; j++) {
-        dst[0] = src[0];
-        dst[1] = src[1];
-        for (i = 2; i < w - 2; i++) {
-            /* Gaussian mask of size 5x5 with sigma = 1.4 */
-            dst[i] = ((src[-2*src_linesize + i-2] + src[2*src_linesize + i-2]) * 2
-                    + (src[-2*src_linesize + i-1] + src[2*src_linesize + i-1]) * 4
-                    + (src[-2*src_linesize + i  ] + src[2*src_linesize + i  ]) * 5
-                    + (src[-2*src_linesize + i+1] + src[2*src_linesize + i+1]) * 4
-                    + (src[-2*src_linesize + i+2] + src[2*src_linesize + i+2]) * 2
-
-                    + (src[  -src_linesize + i-2] + src[  src_linesize + i-2]) *  4
-                    + (src[  -src_linesize + i-1] + src[  src_linesize + i-1]) *  9
-                    + (src[  -src_linesize + i  ] + src[  src_linesize + i  ]) * 12
-                    + (src[  -src_linesize + i+1] + src[  src_linesize + i+1]) *  9
-                    + (src[  -src_linesize + i+2] + src[  src_linesize + i+2]) *  4
-
-                    + src[i-2] *  5
-                    + src[i-1] * 12
-                    + src[i  ] * 15
-                    + src[i+1] * 12
-                    + src[i+2] *  5) / 159;
-        }
-        dst[i    ] = src[i    ];
-        dst[i + 1] = src[i + 1];
-
-        dst += dst_linesize;
-        src += src_linesize;
-    }
-    memcpy(dst, src, w); dst += dst_linesize; src += src_linesize;
-    memcpy(dst, src, w);
-}
 
 enum {
     DIRECTION_45UP,
@@ -163,136 +146,141 @@ enum {
     DIRECTION_VERTICAL,
 };
 
-static int get_rounded_direction(int gx, int gy)
+/*
+static void AVFrame2IplImage(AVFrame* avFrame, IplImage* iplImage)
 {
-    /* reference angles:
-     *   tan( pi/8) = sqrt(2)-1
-     *   tan(3pi/8) = sqrt(2)+1
-     * Gy/Gx is the tangent of the angle (theta), so Gy/Gx is compared against
-     * <ref-angle>, or more simply Gy against <ref-angle>*Gx
-     *
-     * Gx and Gy bounds = [-1020;1020], using 16-bit arithmetic:
-     *   round((sqrt(2)-1) * (1<<16)) =  27146
-     *   round((sqrt(2)+1) * (1<<16)) = 158218
-     */
-    if (gx) {
-        int tanpi8gx, tan3pi8gx;
+    struct SwsContext* img_convert_ctx = 0;
+    int linesize[4] = {0, 0, 0, 0};
 
-        if (gx < 0)
-            gx = -gx, gy = -gy;
-        gy <<= 16;
-        tanpi8gx  =  27146 * gx;
-        tan3pi8gx = 158218 * gx;
-        if (gy > -tan3pi8gx && gy < -tanpi8gx)  return DIRECTION_45UP;
-        if (gy > -tanpi8gx  && gy <  tanpi8gx)  return DIRECTION_HORIZONTAL;
-        if (gy >  tanpi8gx  && gy <  tan3pi8gx) return DIRECTION_45DOWN;
-    }
-    return DIRECTION_VERTICAL;
-}
-
-static void sobel(int w, int h,
-                       uint16_t *dst, int dst_linesize,
-                         int8_t *dir, int dir_linesize,
-                  const uint8_t *src, int src_linesize)
-{
-    int i, j;
-
-    for (j = 1; j < h - 1; j++) {
-        dst += dst_linesize;
-        dir += dir_linesize;
-        src += src_linesize;
-        for (i = 1; i < w - 1; i++) {
-            const int gx =
-                -1*src[-src_linesize + i-1] + 1*src[-src_linesize + i+1]
-                -2*src[                i-1] + 2*src[                i+1]
-                -1*src[ src_linesize + i-1] + 1*src[ src_linesize + i+1];
-            const int gy =
-                -1*src[-src_linesize + i-1] + 1*src[ src_linesize + i-1]
-                -2*src[-src_linesize + i  ] + 2*src[ src_linesize + i  ]
-                -1*src[-src_linesize + i+1] + 1*src[ src_linesize + i+1];
-
-            dst[i] = FFABS(gx) + FFABS(gy);
-            dir[i] = get_rounded_direction(gx, gy);
-        }
+    img_convert_ctx = sws_getContext(avFrame->width, 
+                                        avFrame->height,
+                                        (PixelFormat)avFrame->format,
+                                        iplImage->width,
+                                        iplImage->height,
+                                        PIX_FMT_BGR24, 
+                                        SWS_BICUBIC, 
+                                        0, 0, 0);
+    if (img_convert_ctx != 0) {
+        linesize[0] = 3 * iplImage->width;
+        sws_scale(img_convert_ctx, 
+                    avFrame->data,
+                    avFrame->linesize,
+                    0,
+                    avFrame->height, 
+                    (uint8_t *const*)(&(iplImage->imageData)), 
+                    linesize);
+        sws_freeContext(img_convert_ctx);
     }
 }
+*/
 
-static void non_maximum_suppression(int w, int h,
-                                          uint8_t  *dst, int dst_linesize,
-                                    const  int8_t  *dir, int dir_linesize,
-                                    const uint16_t *src, int src_linesize)
+static void fill_iplimage_from_frame(IplImage *img, const AVFrame *frame, enum AVPixelFormat pixfmt)
 {
-    int i, j;
-
-#define COPY_MAXIMA(ay, ax, by, bx) do {                \
-    if (src[i] > src[(ay)*src_linesize + i+(ax)] &&     \
-        src[i] > src[(by)*src_linesize + i+(bx)])       \
-        dst[i] = av_clip_uint8(src[i]);                 \
-} while (0)
-
-    for (j = 1; j < h - 1; j++) {
-        dst += dst_linesize;
-        dir += dir_linesize;
-        src += src_linesize;
-        for (i = 1; i < w - 1; i++) {
-            switch (dir[i]) {
-            case DIRECTION_45UP:        COPY_MAXIMA( 1, -1, -1,  1); break;
-            case DIRECTION_45DOWN:      COPY_MAXIMA(-1, -1,  1,  1); break;
-            case DIRECTION_HORIZONTAL:  COPY_MAXIMA( 0, -1,  0,  1); break;
-            case DIRECTION_VERTICAL:    COPY_MAXIMA(-1,  0,  1,  0); break;
-            }
-        }
+    IplImage *tmpimg = NULL;
+    int depth = 0, channels_nb = 0;
+ 
+    if (pixfmt == AV_PIX_FMT_GRAY8) { 
+        depth = IPL_DEPTH_8U;  
+        channels_nb = 1; 
+    } else if (pixfmt == AV_PIX_FMT_BGRA)  { 
+        depth = IPL_DEPTH_8U;  
+        channels_nb = 4; 
+    } else if (pixfmt == AV_PIX_FMT_BGR24) { 
+        depth = IPL_DEPTH_8U;  
+        channels_nb = 3; 
+    } else { 
+        return;
     }
+
+    tmpimg = cvCreateImageHeader((CvSize){frame->width, frame->height}, depth, channels_nb);
+    *img = *tmpimg;
+    img->imageData = img->imageDataOrigin = frame->data[0];
+    img->dataOrder = IPL_DATA_ORDER_PIXEL;
+    img->origin    = IPL_ORIGIN_TL;
+    img->widthStep = frame->linesize[0];
 }
 
-static void double_threshold(int low, int high, int w, int h,
-                                   uint8_t *dst, int dst_linesize,
-                             const uint8_t *src, int src_linesize)
-{
-    int i, j;
 
-    for (j = 0; j < h; j++) {
-        for (i = 0; i < w; i++) {
-            if (src[i] > high) {
-                dst[i] = src[i];
-                continue;
-            }
-
-            if ((!i || i == w - 1 || !j || j == h - 1) &&
-                src[i] > low &&
-                (src[-src_linesize + i-1] > high ||
-                 src[-src_linesize + i  ] > high ||
-                 src[-src_linesize + i+1] > high ||
-                 src[                i-1] > high ||
-                 src[                i+1] > high ||
-                 src[ src_linesize + i-1] > high ||
-                 src[ src_linesize + i  ] > high ||
-                 src[ src_linesize + i+1] > high))
-                dst[i] = src[i];
-            else
-                dst[i] = 0;
-        }
-        dst += dst_linesize;
-        src += src_linesize;
-    }
-}
-
-static void color_mix(int w, int h,
-                            uint8_t *dst, int dst_linesize,
-                      const uint8_t *src, int src_linesize)
-{
-    int i, j;
-
-    for (j = 0; j < h; j++) {
-        for (i = 0; i < w; i++)
-            dst[i] = (dst[i] + src[i]) >> 1;
-        dst += dst_linesize;
-        src += src_linesize;
-    }
-}
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
+
+    av_log(NULL, AV_LOG_ERROR, "FILTER!\n");
+    AVFilterContext *ctx = inlink->dst;
+    ColorbarContext *colorbar = ctx->priv;
+    AVFilterLink *outlink = ctx->outputs[0];
+    int direct = 0;
+    AVFrame *out = NULL;
+
+    if (av_frame_is_writable(in)) {
+        direct = 1;
+        out = in;
+    } else {
+        out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
+        if (!out) {
+            av_frame_free(&in);
+            return AVERROR(ENOMEM);
+        }
+        av_frame_copy_props(out, in);
+    }
+    /*
+    IplImage img;
+    fill_iplimage_from_frame(&img, in, AV_PIX_FMT_RGB24);
+    //IplImage *frame = cvCreateImageHeader(cvSize(in->width, in->height), CV_8UC3, 0);
+    //IplImage *frame = cvCreateImageHeader(cvSize(in->width, in->height), CV_8UC3, in->linesize[0]);
+    //frame->imageData = in->data[0];
+    
+    int p[3];
+    p[0] = CV_IMWRITE_JPEG_QUALITY;
+    p[1] = 100;
+    p[2] = 0;
+
+
+    cvSaveImage("WOw.jpg", &img, p);
+    //CvMat(ctx->height, ctx->width, CV_8UC3, in->data[0], in->linesize[0]);
+    */
+
+    int depth = 0, channels_nb = 0;
+ 
+    //if (pixfmt == AV_PIX_FMT_GRAY8) { 
+    //    depth = IPL_DEPTH_8U;  
+    //    channels_nb = 1; 
+    //} else if (pixfmt == AV_PIX_FMT_BGRA)  { 
+    //    depth = IPL_DEPTH_8U;  
+    //    channels_nb = 4; 
+    //} else if (pixfmt == AV_PIX_FMT_BGR24) { 
+        depth = IPL_DEPTH_8U;  
+        channels_nb = 3; 
+    //} else { 
+    //    return;
+    //}
+
+    IplImage *img = cvCreateImageHeader((CvSize){in->width, in->height}, depth, channels_nb);
+    img->imageData = img->imageDataOrigin = in->data[0];
+    img->dataOrder = IPL_DATA_ORDER_PIXEL;
+    img->origin    = IPL_ORIGIN_TL;
+    img->widthStep = in->linesize[0];
+
+
+    int p[3];
+    p[0] = CV_IMWRITE_JPEG_QUALITY;
+    p[1] = 100;
+    p[2] = 0;
+
+    cvSaveImage("WOw.jpg", img, p);
+
+
+
+
+
+
+    if (!direct)
+        av_frame_free(&in);
+
+
+    return ff_filter_frame(outlink, out);
+
+    /*
     AVFilterContext *ctx = inlink->dst;
     ColorbarContext *colorbar = ctx->priv;
     AVFilterLink *outlink = ctx->outputs[0];
@@ -317,26 +305,26 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         uint16_t *gradients  = plane->gradients;
         int8_t   *directions = plane->directions;
 
-        /* gaussian filter to reduce noise  */
+        // gaussian filter to reduce noise  
         gaussian_blur(ctx, inlink->w, inlink->h,
                       tmpbuf,      inlink->w,
                       in->data[p], in->linesize[p]);
 
-        /* compute the 16-bits gradients and directions for the next step */
+        // compute the 16-bits gradients and directions for the next step 
         sobel(inlink->w, inlink->h,
               gradients, inlink->w,
               directions,inlink->w,
               tmpbuf,    inlink->w);
 
-        /* non_maximum_suppression() will actually keep & clip what's necessary and
-         * ignore the rest, so we need a clean output buffer */
+        // non_maximum_suppression() will actually keep & clip what's necessary and
+        // ignore the rest, so we need a clean output buffer 
         memset(tmpbuf, 0, inlink->w * inlink->h);
         non_maximum_suppression(inlink->w, inlink->h,
                                 tmpbuf,    inlink->w,
                                 directions,inlink->w,
                                 gradients, inlink->w);
 
-        /* keep high values, or low values surrounded by high values */
+        // keep high values, or low values surrounded by high values 
         double_threshold(colorbar->low_u8, colorbar->high_u8,
                          inlink->w, inlink->h,
                          out->data[p], out->linesize[p],
@@ -351,11 +339,15 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
     if (!direct)
         av_frame_free(&in);
+    
     return ff_filter_frame(outlink, out);
+    */
+    //return 0;
 }
 
 static av_cold void uninit(AVFilterContext *ctx)
 {
+    /*
     int p;
     ColorbarContext *colorbar = ctx->priv;
 
@@ -365,6 +357,7 @@ static av_cold void uninit(AVFilterContext *ctx)
         av_freep(&plane->gradients);
         av_freep(&plane->directions);
     }
+    */
 }
 
 static const AVFilterPad colorbar_inputs[] = {
