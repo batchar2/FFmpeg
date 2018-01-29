@@ -200,17 +200,67 @@ static void fill_iplimage_from_frame(IplImage *img, const AVFrame *frame, enum A
     img->widthStep = frame->linesize[0];
 }
 
+static int64 haming_distance(uint64_t hash1, uint64_t hash2) 
+{
+    int64 dist = 0, val = hash1 ^ hash2;
+    // Count the number of set bits
+    while(val) {
+        ++dist; 
+        val &= val - 1;
+    }
+    return dist;
+}
+
+static uint64_t calc_image_phash(IplImage *image)
+{
+    uint64_t hash = 0;
+    CvSize size_img = cvSize(8, 8);
+    CvScalar average;
+    int i = 0;
+    uint64_t one = 1;
+
+    //
+    IplImage *res = cvCreateImage(size_img, image->depth, image->nChannels);
+    IplImage *gray = cvCreateImage(size_img, IPL_DEPTH_8U, 1);
+    IplImage *bin = cvCreateImage(size_img, IPL_DEPTH_8U, 1);
+
+    // resize image
+    cvResize(image, res, CV_INTER_LINEAR);
+    
+    // to gray
+    cvCvtColor(res, gray, CV_BGR2GRAY);
+    // среднее-арифметическое
+    average = cvAvg(gray, NULL);
+
+    // получим бинарное изображение относительно среднего
+    // для этого воспользуемся пороговым преобразованием
+    cvThreshold(gray, bin, average.val[0], 255, CV_THRESH_BINARY);
+
+    // пробегаемся по всем пикселям изображения
+    for( int y=0; y<bin->height; y++ ) {
+        uchar* ptr = (uchar*) (bin->imageData + y * bin->widthStep);
+        for( int x=0; x<bin->width; x++ ) {
+            // 1 канал
+            if(ptr[x]){
+                hash |= one<<i;  // warning C4334: '<<' : result of 32-bit shift implicitly converted to 64 bits (was 64-bit shift intended?)
+                //hash |= 1i64<<i; 
+            }
+            i++;
+        }
+    }   
+    return hash;
+}
 
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
-
     av_log(NULL, AV_LOG_ERROR, "FILTER!\n");
     AVFilterContext *ctx = inlink->dst;
     ColorbarContext *colorbar = ctx->priv;
     AVFilterLink *outlink = ctx->outputs[0];
     int direct = 0;
     AVFrame *out = NULL;
+
 
     if (av_frame_is_writable(in)) {
         direct = 1;
@@ -223,38 +273,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         }
         av_frame_copy_props(out, in);
     }
-    /*
-    IplImage img;
-    fill_iplimage_from_frame(&img, in, AV_PIX_FMT_RGB24);
-    //IplImage *frame = cvCreateImageHeader(cvSize(in->width, in->height), CV_8UC3, 0);
-    //IplImage *frame = cvCreateImageHeader(cvSize(in->width, in->height), CV_8UC3, in->linesize[0]);
-    //frame->imageData = in->data[0];
     
-    int p[3];
-    p[0] = CV_IMWRITE_JPEG_QUALITY;
-    p[1] = 100;
-    p[2] = 0;
-
-
-    cvSaveImage("WOw.jpg", &img, p);
-    //CvMat(ctx->height, ctx->width, CV_8UC3, in->data[0], in->linesize[0]);
-    */
-
-    int depth = 0, channels_nb = 0;
- 
-    //if (pixfmt == AV_PIX_FMT_GRAY8) { 
-    //    depth = IPL_DEPTH_8U;  
-    //    channels_nb = 1; 
-    //} else if (pixfmt == AV_PIX_FMT_BGRA)  { 
-    //    depth = IPL_DEPTH_8U;  
-    //    channels_nb = 4; 
-    //} else if (pixfmt == AV_PIX_FMT_BGR24) { 
-        depth = IPL_DEPTH_8U;  
-        channels_nb = 3; 
-    //} else { 
-    //    return;
-    //}
-
+    int depth = IPL_DEPTH_8U, channels_nb = 3;
     IplImage *img = cvCreateImageHeader((CvSize){in->width, in->height}, depth, channels_nb);
     img->imageData = img->imageDataOrigin = in->data[0];
     img->dataOrder = IPL_DATA_ORDER_PIXEL;
@@ -262,87 +282,29 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     img->widthStep = in->linesize[0];
 
 
+    uint64_t hash_img = calc_image_phash(img);
+
+    IplImage *colorbar_img = cvLoadImage("/home/bat/Pictures/colorbars/colorbar.jpg", 1);
+    uint64_t hash_colorbar = calc_image_phash(colorbar_img);
+    uint64_t calc_hash =  haming_distance(hash_img, hash_colorbar);
+
+
+    //av_log(NULL, AV_LOG_ERROR, "Hash = " PRId64 "\n", hash);
+    av_log(NULL, AV_LOG_ERROR, "hash_img = %llu\n", hash_img);
+    av_log(NULL, AV_LOG_ERROR, "hash_colorbar = %llu\n", hash_colorbar);
+    av_log(NULL, AV_LOG_ERROR, "calc_hash = %llu\n", calc_hash);    
+
+    /*
     int p[3];
     p[0] = CV_IMWRITE_JPEG_QUALITY;
     p[1] = 100;
     p[2] = 0;
-
     cvSaveImage("WOw.jpg", img, p);
-
-
-
-
-
-
-    if (!direct)
-        av_frame_free(&in);
-
-
-    return ff_filter_frame(outlink, out);
-
-    /*
-    AVFilterContext *ctx = inlink->dst;
-    ColorbarContext *colorbar = ctx->priv;
-    AVFilterLink *outlink = ctx->outputs[0];
-    int p, direct = 0;
-    AVFrame *out;
-
-    if (colorbar->mode != MODE_COLORMIX && av_frame_is_writable(in)) {
-        direct = 1;
-        out = in;
-    } else {
-        out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-        if (!out) {
-            av_frame_free(&in);
-            return AVERROR(ENOMEM);
-        }
-        av_frame_copy_props(out, in);
-    }
-
-    for (p = 0; p < colorbar->nb_planes; p++) {
-        struct plane_info *plane = &colorbar->planes[p];
-        uint8_t  *tmpbuf     = plane->tmpbuf;
-        uint16_t *gradients  = plane->gradients;
-        int8_t   *directions = plane->directions;
-
-        // gaussian filter to reduce noise  
-        gaussian_blur(ctx, inlink->w, inlink->h,
-                      tmpbuf,      inlink->w,
-                      in->data[p], in->linesize[p]);
-
-        // compute the 16-bits gradients and directions for the next step 
-        sobel(inlink->w, inlink->h,
-              gradients, inlink->w,
-              directions,inlink->w,
-              tmpbuf,    inlink->w);
-
-        // non_maximum_suppression() will actually keep & clip what's necessary and
-        // ignore the rest, so we need a clean output buffer 
-        memset(tmpbuf, 0, inlink->w * inlink->h);
-        non_maximum_suppression(inlink->w, inlink->h,
-                                tmpbuf,    inlink->w,
-                                directions,inlink->w,
-                                gradients, inlink->w);
-
-        // keep high values, or low values surrounded by high values 
-        double_threshold(colorbar->low_u8, colorbar->high_u8,
-                         inlink->w, inlink->h,
-                         out->data[p], out->linesize[p],
-                         tmpbuf,       inlink->w);
-
-        if (colorbar->mode == MODE_COLORMIX) {
-            color_mix(inlink->w, inlink->h,
-                      out->data[p], out->linesize[p],
-                      in->data[p], in->linesize[p]);
-        }
-    }
-
-    if (!direct)
-        av_frame_free(&in);
-    
-    return ff_filter_frame(outlink, out);
     */
-    //return 0;
+    if (!direct)
+        av_frame_free(&in);
+
+    return ff_filter_frame(outlink, out);    
 }
 
 static av_cold void uninit(AVFilterContext *ctx)
