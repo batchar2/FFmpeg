@@ -53,53 +53,47 @@ struct plane_info {
 /** Контекст исполнения, на него вешаются опции */
 typedef struct ColorbarContext {
     const AVClass *class;
-    char *colorbar_file;
+    char *file;
     char *method;
-    //struct plane_info planes[3];
-    //int nb_planes;
-    //double   low, high;
-    //uint8_t  low_u8, high_u8;
-    //int mode;
+
+    uint64_t hash;
 } ColorbarContext;
 
-#define OFFSET(x) offsetof(ColorbarContext, x)
-#define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
-/*
+
 static const AVOption colorbar_options[] = {
-    { "high", "set high threshold", OFFSET(high), AV_OPT_TYPE_DOUBLE, {.dbl=50/255.}, 0, 1, FLAGS },
-    { "low",  "set low threshold",  OFFSET(low),  AV_OPT_TYPE_DOUBLE, {.dbl=20/255.}, 0, 1, FLAGS },
-    { "mode", "set mode", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=MODE_WIRES}, 0, NB_MODE-1, FLAGS, "mode" },
-        { "wires",    "white/gray wires on black",  0, AV_OPT_TYPE_CONST, {.i64=MODE_WIRES},    INT_MIN, INT_MAX, FLAGS, "mode" },
-        { "colormix", "mix colors",                 0, AV_OPT_TYPE_CONST, {.i64=MODE_COLORMIX}, INT_MIN, INT_MAX, FLAGS, "mode" },
-    { NULL }
-};
-*/
-static const AVOption colorbar_options[] = {
-   {"colorbar", "path to colorbars", offsetof(ColorbarContext, colorbar_file), AV_OPT_TYPE_STRING},
+   {"file", "path to colorbars", offsetof(ColorbarContext, file), AV_OPT_TYPE_STRING},
    {"method", "math method", offsetof(ColorbarContext, method), AV_OPT_TYPE_STRING},
    {NULL}
-   /*
-   { "high", "set high threshold", OFFSET(high), AV_OPT_TYPE_DOUBLE, {.dbl=50/255.}, 0, 1, FLAGS },
-    { "low",  "set low threshold",  OFFSET(low),  AV_OPT_TYPE_DOUBLE, {.dbl=20/255.}, 0, 1, FLAGS },
-    { "mode", "set mode", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=MODE_WIRES}, 0, NB_MODE-1, FLAGS, "mode" },
-        { "wires",    "white/gray wires on black",  0, AV_OPT_TYPE_CONST, {.i64=MODE_WIRES},    INT_MIN, INT_MAX, FLAGS, "mode" },
-        { "colormix", "mix colors",                 0, AV_OPT_TYPE_CONST, {.i64=MODE_COLORMIX}, INT_MIN, INT_MAX, FLAGS, "mode" },
-    { NULL }
-    */
 };
 
 AVFILTER_DEFINE_CLASS(colorbar);
 
-static av_cold int init(AVFilterContext *ctx)
-{
 
-    av_log(NULL, AV_LOG_ERROR, "HELLO, World! Init\n");
-    /*
+static int64 haming_distance(uint64_t hash1, uint64_t hash2);
+static uint64_t calc_image_phash(IplImage *image);
+
+
+static av_cold int init(AVFilterContext *ctx)
+{    
+    IplImage *colorbar_img = NULL;
+
+    //av_log(NULL, AV_LOG_ERROR, "HELLO, World! Init\n");
     ColorbarContext *colorbar = ctx->priv;
 
-    colorbar->low_u8  = colorbar->low  * 255. + .5;
-    colorbar->high_u8 = colorbar->high * 255. + .5;
-    */
+    if (colorbar->file == NULL) {
+        av_log(NULL, AV_LOG_ERROR, "Colorbar file not defined! Use option: file\n");
+        return 1;
+    } 
+    
+    colorbar_img = cvLoadImage(colorbar->file, 1);
+    if (colorbar_img == NULL) {
+        av_log(NULL, AV_LOG_ERROR, "Colorbar file not found!\n");
+        return 1;
+    } 
+    colorbar->hash = calc_image_phash(colorbar_img);
+
+    av_log(NULL, AV_LOG_ERROR, "hash_colorbar = %llu\n", colorbar->hash);
+    av_log(NULL, AV_LOG_ERROR, "HELLO, World! Init %s\n", colorbar->file);
     return 0;
 }
 
@@ -261,7 +255,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     int direct = 0;
     AVFrame *out = NULL;
 
-
     if (av_frame_is_writable(in)) {
         direct = 1;
         out = in;
@@ -283,15 +276,12 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
 
     uint64_t hash_img = calc_image_phash(img);
-
-    IplImage *colorbar_img = cvLoadImage("/home/bat/Pictures/colorbars/colorbar.jpg", 1);
-    uint64_t hash_colorbar = calc_image_phash(colorbar_img);
-    uint64_t calc_hash =  haming_distance(hash_img, hash_colorbar);
-
+    
+    //uint64_t hash_colorbar = calc_image_phash(colorbar_img);
+    uint64_t calc_hash =  haming_distance(hash_img, colorbar->hash);
 
     //av_log(NULL, AV_LOG_ERROR, "Hash = " PRId64 "\n", hash);
     av_log(NULL, AV_LOG_ERROR, "hash_img = %llu\n", hash_img);
-    av_log(NULL, AV_LOG_ERROR, "hash_colorbar = %llu\n", hash_colorbar);
     av_log(NULL, AV_LOG_ERROR, "calc_hash = %llu\n", calc_hash);    
 
     /*
