@@ -89,8 +89,10 @@ static av_cold int init(AVFilterContext *ctx)
     if (colorbar_img == NULL) {
         av_log(NULL, AV_LOG_ERROR, "Colorbar file not found!\n");
         return 1;
-    } 
+    }
     colorbar->hash = calc_image_phash(colorbar_img);
+    cvReleaseImage(&colorbar_img);
+
 
     av_log(NULL, AV_LOG_ERROR, "hash_colorbar = %llu\n", colorbar->hash);
     av_log(NULL, AV_LOG_ERROR, "HELLO, World! Init %s\n", colorbar->file);
@@ -241,7 +243,10 @@ static uint64_t calc_image_phash(IplImage *image)
             }
             i++;
         }
-    }   
+    }
+    cvReleaseImage(&res);
+    cvReleaseImage(&gray);
+    cvReleaseImage(&bin);
     return hash;
 }
 
@@ -276,11 +281,10 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
 
     uint64_t hash_img = calc_image_phash(img);
-    
-    //uint64_t hash_colorbar = calc_image_phash(colorbar_img);
     uint64_t calc_hash =  haming_distance(hash_img, colorbar->hash);
 
-    //av_log(NULL, AV_LOG_ERROR, "Hash = " PRId64 "\n", hash);
+
+
     av_log(NULL, AV_LOG_ERROR, "hash_img = %llu\n", hash_img);
     av_log(NULL, AV_LOG_ERROR, "calc_hash = %llu\n", calc_hash);    
 
@@ -291,6 +295,9 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     p[2] = 0;
     cvSaveImage("WOw.jpg", img, p);
     */
+    //cvReleaseImage(&img);
+
+
     if (!direct)
         av_frame_free(&in);
 
