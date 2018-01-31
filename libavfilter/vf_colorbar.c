@@ -38,10 +38,9 @@
 #include "internal.h"
 #include "video.h"
 
-enum FilterMode {
-    MODE_WIRES,
-    MODE_COLORMIX,
-    NB_MODE
+enum MethdType {
+    METHOD_HASH = 0,
+    METHOD_PHASH = 1
 };
 
 struct plane_info {
@@ -54,15 +53,18 @@ struct plane_info {
 typedef struct ColorbarContext {
     const AVClass *class;
     char *file;
-    char *method;
+    char *method_name;
 
+    int threshold;
+    int method;
     uint64_t hash;
 } ColorbarContext;
 
 
 static const AVOption colorbar_options[] = {
    {"file", "path to colorbars", offsetof(ColorbarContext, file), AV_OPT_TYPE_STRING},
-   {"method", "math method", offsetof(ColorbarContext, method), AV_OPT_TYPE_STRING},
+   {"method", "math method", offsetof(ColorbarContext, method_name), AV_OPT_TYPE_STRING},
+   {"threshold", "threshold value", offsetof(ColorbarContext, threshold), AV_OPT_TYPE_INT, { .i64 = -1 }, 0, 64},
    {NULL}
 };
 
@@ -70,14 +72,12 @@ AVFILTER_DEFINE_CLASS(colorbar);
 
 
 static int64 haming_distance(uint64_t hash1, uint64_t hash2);
+static uint64_t calc_image_hash(IplImage *image);
 static uint64_t calc_image_phash(IplImage *image);
-
 
 static av_cold int init(AVFilterContext *ctx)
 {    
     IplImage *colorbar_img = NULL;
-
-    //av_log(NULL, AV_LOG_ERROR, "HELLO, World! Init\n");
     ColorbarContext *colorbar = ctx->priv;
 
     if (colorbar->file == NULL) {
@@ -90,18 +90,19 @@ static av_cold int init(AVFilterContext *ctx)
         av_log(NULL, AV_LOG_ERROR, "Colorbar file not found!\n");
         return 1;
     }
-    colorbar->hash = calc_image_phash(colorbar_img);
+    //if (colorbar->method == METHOD_HASH) {
+        colorbar->hash = calc_image_phash(colorbar_img);
+    //} else {
+    //    colorbar->hash = calc_image_hash(colorbar_img);
+    //}
     cvReleaseImage(&colorbar_img);
 
-
     av_log(NULL, AV_LOG_ERROR, "hash_colorbar = %llu\n", colorbar->hash);
-    av_log(NULL, AV_LOG_ERROR, "HELLO, World! Init %s\n", colorbar->file);
     return 0;
 }
 
 static int query_formats(AVFilterContext *ctx)
 {
-    const ColorbarContext *colorbar = ctx->priv;
     static const enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_BGR24, AV_PIX_FMT_NONE};
     AVFilterFormats *fmts_list = NULL;
 
@@ -109,7 +110,6 @@ static int query_formats(AVFilterContext *ctx)
     if (!fmts_list)
         return AVERROR(ENOMEM);
     return ff_set_common_formats(ctx, fmts_list);
-
 }
 
 
@@ -135,46 +135,11 @@ static int config_props(AVFilterLink *inlink)
 }
 
 
-enum {
-    DIRECTION_45UP,
-    DIRECTION_45DOWN,
-    DIRECTION_HORIZONTAL,
-    DIRECTION_VERTICAL,
-};
-
-/*
-static void AVFrame2IplImage(AVFrame* avFrame, IplImage* iplImage)
+static IplImage* avframe2image(const AVFrame *frame, enum AVPixelFormat pixfmt)
 {
-    struct SwsContext* img_convert_ctx = 0;
-    int linesize[4] = {0, 0, 0, 0};
-
-    img_convert_ctx = sws_getContext(avFrame->width, 
-                                        avFrame->height,
-                                        (PixelFormat)avFrame->format,
-                                        iplImage->width,
-                                        iplImage->height,
-                                        PIX_FMT_BGR24, 
-                                        SWS_BICUBIC, 
-                                        0, 0, 0);
-    if (img_convert_ctx != 0) {
-        linesize[0] = 3 * iplImage->width;
-        sws_scale(img_convert_ctx, 
-                    avFrame->data,
-                    avFrame->linesize,
-                    0,
-                    avFrame->height, 
-                    (uint8_t *const*)(&(iplImage->imageData)), 
-                    linesize);
-        sws_freeContext(img_convert_ctx);
-    }
-}
-*/
-
-static void fill_iplimage_from_frame(IplImage *img, const AVFrame *frame, enum AVPixelFormat pixfmt)
-{
-    IplImage *tmpimg = NULL;
+    IplImage *header = NULL;
     int depth = 0, channels_nb = 0;
- 
+
     if (pixfmt == AV_PIX_FMT_GRAY8) { 
         depth = IPL_DEPTH_8U;  
         channels_nb = 1; 
@@ -184,16 +149,18 @@ static void fill_iplimage_from_frame(IplImage *img, const AVFrame *frame, enum A
     } else if (pixfmt == AV_PIX_FMT_BGR24) { 
         depth = IPL_DEPTH_8U;  
         channels_nb = 3; 
-    } else { 
-        return;
+    } else {
+        av_log(NULL, AV_LOG_ERROR, "pixfmt error");
+        return NULL;
     }
 
-    tmpimg = cvCreateImageHeader((CvSize){frame->width, frame->height}, depth, channels_nb);
-    *img = *tmpimg;
-    img->imageData = img->imageDataOrigin = frame->data[0];
-    img->dataOrder = IPL_DATA_ORDER_PIXEL;
-    img->origin    = IPL_ORIGIN_TL;
-    img->widthStep = frame->linesize[0];
+    header = cvCreateImageHeader((CvSize){frame->width, frame->height}, depth, channels_nb);
+    header->imageData = header->imageDataOrigin = frame->data[0];
+    header->dataOrder = IPL_DATA_ORDER_PIXEL;
+    header->origin    = IPL_ORIGIN_TL;
+    header->widthStep = frame->linesize[0];
+
+    return header;
 }
 
 static int64 haming_distance(uint64_t hash1, uint64_t hash2) 
@@ -209,13 +176,86 @@ static int64 haming_distance(uint64_t hash1, uint64_t hash2)
 
 static uint64_t calc_image_phash(IplImage *image)
 {
+    int x = 0, y = 0;
+    double avg = 0;
+    uint64_t phash = 0, phash_mask = 1;
+    const int DCT_SIZE = 64;
+    
+    IplImage *mono = NULL;
+    IplImage *small = NULL;
+    CvMat *dct = NULL;
+    CvMat roi;
+    /*
+    // #1
+    small = cvCreateImage(cvSize(DCT_SIZE, DCT_SIZE), image->depth, 1);
+    if (image->nChannels == 1) {
+        cvCopy(image, mono, 0);
+    } else { 
+        cvCvtColor(image, mono, CV_RGB2GRAY);
+    }
+    // #2
+    mono = cvCreateImage(cvSize(small->width, small->height), small->depth, 1);
+    // #3
+    dct = cvCreateMat(DCT_SIZE, DCT_SIZE, CV_64FC1);
+    cvConvertScale(small, dct, 1, 0);
+    cvDCT(dct, dct, CV_DXT_ROWS);
+    cvGetSubRect(dct, &roi, cvRect(0, 0, 8, 8));    
+
+    avg = cvAvg(&roi, 0).val[0] * 64.0 / 63.0;
+
+    for (x = 7; x >= 0; x--) {
+        for (y = 7; y >= 0; y--) {
+            if (cvGet2D(dct, x, y).val[0] > avg)
+                phash |= phash_mask;
+            phash_mask = phash_mask << 1ull;
+        }
+    }
+    return phash_mask;
+    */
+    mono = cvCreateImage(cvSize(image->width, image->height), image->depth, 1);
+    small = cvCreateImage(cvSize(DCT_SIZE, DCT_SIZE), image->depth, 1);
+    
+    if (image->nChannels == 1) {
+        cvCopy(image, mono, 0);
+    } else { 
+        cvCvtColor(image, mono, CV_RGB2GRAY);
+    }
+    dct = cvCreateMat(DCT_SIZE, DCT_SIZE, CV_64FC1);
+    
+    cvConvertScale(small, dct, 1, 0);
+    cvTranspose(dct, dct);
+    cvDCT(dct, dct, CV_DXT_ROWS);
+    cvSet2D(dct, 0, 0, cvScalarAll(0));
+
+
+    cvGetSubRect(dct, &roi, cvRect(0, 0, 8, 8));
+    avg = cvAvg(&roi, 0).val[0] * 64.0 / 63.0;
+
+    for (x = 7; x >= 0; x--) {
+        for (y = 7; y >= 0; y--) {
+            if (cvGet2D(dct, x, y).val[0] > avg)
+                phash |= phash_mask;
+            phash_mask = phash_mask << 1;
+        }
+    }
+
+    cvReleaseMat(&dct);
+    cvReleaseImage(&mono);
+    cvReleaseImage(&small);
+    
+
+    av_log(NULL, AV_LOG_ERROR, "phash_colorbar = %llu\n", phash);
+
+    return phash;
+}
+
+static uint64_t calc_image_hash(IplImage *image)
+{
     uint64_t hash = 0;
     CvSize size_img = cvSize(8, 8);
     CvScalar average;
     int i = 0;
-    uint64_t one = 1;
-
-    //
+    
     IplImage *res = cvCreateImage(size_img, image->depth, image->nChannels);
     IplImage *gray = cvCreateImage(size_img, IPL_DEPTH_8U, 1);
     IplImage *bin = cvCreateImage(size_img, IPL_DEPTH_8U, 1);
@@ -238,7 +278,7 @@ static uint64_t calc_image_phash(IplImage *image)
         for( int x=0; x<bin->width; x++ ) {
             // 1 канал
             if(ptr[x]){
-                hash |= one<<i;  // warning C4334: '<<' : result of 32-bit shift implicitly converted to 64 bits (was 64-bit shift intended?)
+                hash |= 1ull<<i;  // warning C4334: '<<' : result of 32-bit shift implicitly converted to 64 bits (was 64-bit shift intended?)
                 //hash |= 1i64<<i; 
             }
             i++;
@@ -253,12 +293,13 @@ static uint64_t calc_image_phash(IplImage *image)
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
-    av_log(NULL, AV_LOG_ERROR, "FILTER!\n");
     AVFilterContext *ctx = inlink->dst;
     ColorbarContext *colorbar = ctx->priv;
     AVFilterLink *outlink = ctx->outputs[0];
-    int direct = 0;
     AVFrame *out = NULL;
+    int direct = 0;
+    uint64_t hash_img = 0, calc_hash = 0;
+    IplImage *img = NULL;
 
     if (av_frame_is_writable(in)) {
         direct = 1;
@@ -272,35 +313,20 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         av_frame_copy_props(out, in);
     }
     
-    int depth = IPL_DEPTH_8U, channels_nb = 3;
-    IplImage *img = cvCreateImageHeader((CvSize){in->width, in->height}, depth, channels_nb);
-    img->imageData = img->imageDataOrigin = in->data[0];
-    img->dataOrder = IPL_DATA_ORDER_PIXEL;
-    img->origin    = IPL_ORIGIN_TL;
-    img->widthStep = in->linesize[0];
-
-
-    uint64_t hash_img = calc_image_phash(img);
-    uint64_t calc_hash =  haming_distance(hash_img, colorbar->hash);
-
-
-
-    av_log(NULL, AV_LOG_ERROR, "hash_img = %llu\n", hash_img);
-    av_log(NULL, AV_LOG_ERROR, "calc_hash = %llu\n", calc_hash);    
-
-    /*
-    int p[3];
-    p[0] = CV_IMWRITE_JPEG_QUALITY;
-    p[1] = 100;
-    p[2] = 0;
-    cvSaveImage("WOw.jpg", img, p);
-    */
-    //cvReleaseImage(&img);
-
-
+    img = avframe2image(in, AV_PIX_FMT_BGR24);
+    if (img != NULL) {
+        
+        //if (colorbar->method == METHOD_HASH) {
+            hash_img = calc_image_phash(img);
+        //} else {
+        //    hash_img = calc_image_hash(img);
+        //}
+        calc_hash = haming_distance(hash_img, colorbar->hash);
+        //av_log(NULL, AV_LOG_ERROR, "calc_hash = %llu\n", calc_hash);    
+        //cvReleaseImageHeader(img);
+    }
     if (!direct)
         av_frame_free(&in);
-
     return ff_filter_frame(outlink, out);    
 }
 
@@ -339,7 +365,7 @@ static const AVFilterPad colorbar_outputs[] = {
 
 AVFilter ff_vf_colorbar = {
     .name          = "colorbar",
-    .description   = NULL_IF_CONFIG_SMALL("Detect and draw edge."),
+    .description   = NULL_IF_CONFIG_SMALL("Detect colorbars."),
     .priv_size     = sizeof(ColorbarContext),
     .init          = init,
     .uninit        = uninit,
