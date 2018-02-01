@@ -20,9 +20,9 @@
 
 /**
  * @file
- * Edge detection filter
+ * Colorbar detection filter
  *
- * @see https://en.wikipedia.org/wiki/Canny_edge_detector
+ * @see https://habrahabr.ru/post/120562/
  */
 
 #include <cv.h>
@@ -38,18 +38,7 @@
 #include "internal.h"
 #include "video.h"
 
-enum MethdType {
-    METHOD_HASH = 0,
-    METHOD_PHASH = 1
-};
 
-struct plane_info {
-    uint8_t  *tmpbuf;
-    uint16_t *gradients;
-    char     *directions;
-};
-
-/** Контекст исполнения, на него вешаются опции */
 typedef struct ColorbarContext {
     const AVClass *class;
     char *file;
@@ -81,18 +70,18 @@ static av_cold int init(AVFilterContext *ctx)
     ColorbarContext *option = ctx->priv;
 
     if (option->threshold == -1) {
-        av_log(NULL, AV_LOG_ERROR, "Colorbar option error! Not set threshold! Use option: \"threshold\"  \n");
+        av_log(NULL, AV_LOG_ERROR, "Error: option \"threshold\" is not set\n");
         return AVERROR(EINVAL);
     }
 
     if (option->file == NULL) {
-        av_log(NULL, AV_LOG_ERROR, "Colorbar option error! Not set option file! Use option: \"file\"  \n");
+        av_log(NULL, AV_LOG_ERROR, "Error: option \"file\" is not set\n");
         return AVERROR(EINVAL);
     } 
     
     colorbar_img = cvLoadImage(option->file, 1);
     if (colorbar_img == NULL) {
-        av_log(NULL, AV_LOG_ERROR, "Colorbar file not found!\n");
+        av_log(NULL, AV_LOG_ERROR, "Colorbar \"%s\" file not found!\n", option->file);
         return AVERROR(EINVAL);
     }
     option->hash = calc_image_phash(colorbar_img);
@@ -158,6 +147,9 @@ static int64 haming_distance(uint64_t hash1, uint64_t hash2)
     return dist;
 }
 
+/**
+* https://habrahabr.ru/post/120562/
+*/
 static uint64_t calc_image_phash(IplImage *img)
 {
     const int DCT_SIZE = 32;
@@ -203,41 +195,42 @@ static uint64_t calc_image_phash(IplImage *img)
     return phash;
 }
 
-static int filter_frame(AVFilterLink *inlink, AVFrame *in)
+static int filter_frame(AVFilterLink *inlink, AVFrame *in_frame)
 {
+    int direct = 0;
+    IplImage *img = NULL;
+    uint64_t hash_img = 0, distance = 0;
+    
+    AVFrame *out_frame = NULL;
     AVFilterContext *ctx = inlink->dst;
     ColorbarContext *option = ctx->priv;
-    AVFilterLink *outlink = ctx->outputs[0];
-    AVFrame *out = NULL;
-    int direct = 0;
-    uint64_t hash_img = 0, distance = 0;
-    IplImage *img = NULL;
+    AVFilterLink *outlink = inlink->dst->outputs[0];
 
-    if (av_frame_is_writable(in)) {
+    if (av_frame_is_writable(in_frame)) {
         direct = 1;
-        out = in;
+        out_frame = in_frame;
     } else {
-        out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-        if (!out) {
-            av_frame_free(&in);
+        out_frame = ff_get_video_buffer(outlink, outlink->w, outlink->h);
+        if (!out_frame) {
+            av_frame_free(&in_frame);
             return AVERROR(ENOMEM);
         }
-        av_frame_copy_props(out, in);
+        av_frame_copy_props(out_frame, in_frame);
     }
-    img = avframe2image(in, AV_PIX_FMT_BGR24);
-
+    img = avframe2image(in_frame, AV_PIX_FMT_BGR24);
     if (img != NULL) {
         hash_img = calc_image_phash(img);
         distance = haming_distance(hash_img, option->hash);
         if (distance <= option->threshold) {
-            av_log(NULL, AV_LOG_ERROR, "Colorbar detect! Distance = %lu\n", distance);
+            av_log(NULL, AV_LOG_ERROR, "Colorbar detected! Distance = %lu\n", distance);
         }
         cvReleaseImageHeader(&img);
     }
     if (!direct)
-        av_frame_free(&in);
-    return ff_filter_frame(outlink, out);    
+        av_frame_free(&in_frame);
+    return ff_filter_frame(outlink, out_frame);    
 }
+
 
 static av_cold void uninit(AVFilterContext *ctx)
 {
