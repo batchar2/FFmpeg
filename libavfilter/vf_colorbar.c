@@ -61,9 +61,11 @@ typedef struct ColorbarContext {
 } ColorbarContext;
 
 
+#define FLAGS      (AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM)
+
 static const AVOption colorbar_options[] = {
    {"file", "path to colorbars", offsetof(ColorbarContext, file), AV_OPT_TYPE_STRING},
-   //{"threshold", "threshold value", offsetof(ColorbarContext, threshold), AV_OPT_TYPE_INT, { .i64 = -1 }, 0, 64},
+   {"threshold", "threshold value", offsetof(ColorbarContext, threshold), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 64, FLAGS},
    {NULL}
 };
 
@@ -71,47 +73,42 @@ AVFILTER_DEFINE_CLASS(colorbar);
 
 
 static int64 haming_distance(uint64_t hash1, uint64_t hash2);
-static uint64_t calc_image_hash(IplImage *image);
 static uint64_t calc_image_phash(IplImage *image);
 
 static av_cold int init(AVFilterContext *ctx)
-{    
+{
     IplImage *colorbar_img = NULL;
     ColorbarContext *option = ctx->priv;
 
-    //if (option->threshold == -1) {
-    //    av_log(NULL, AV_LOG_ERROR, "Colorbar option error! Not set option \"threshold\"!\n");
-    //    return -1;
-    //}
+    if (option->threshold == -1) {
+        av_log(NULL, AV_LOG_ERROR, "Colorbar option error! Not set threshold! Use option: \"threshold\"  \n");
+        return AVERROR(EINVAL);
+    }
 
     if (option->file == NULL) {
-        av_log(NULL, AV_LOG_ERROR, "Colorbar file not defined! Use option: file\n");
-        return -1;
+        av_log(NULL, AV_LOG_ERROR, "Colorbar option error! Not set option file! Use option: \"file\"  \n");
+        return AVERROR(EINVAL);
     } 
     
     colorbar_img = cvLoadImage(option->file, 1);
     if (colorbar_img == NULL) {
         av_log(NULL, AV_LOG_ERROR, "Colorbar file not found!\n");
-        return -1;
+        return AVERROR(EINVAL);
     }
-
     option->hash = calc_image_phash(colorbar_img);
 
     cvReleaseImage(&colorbar_img);
-
-    av_log(NULL, AV_LOG_ERROR, "hash_colorbar = %llu\n", option->hash);
+    
     return 0;
 }
 
 static int query_formats(AVFilterContext *ctx)
 {
-    static const enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_BGR24, AV_PIX_FMT_NONE};
-    AVFilterFormats *fmts_list = NULL;
-
-    fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
+    static const enum AVPixelFormat pix_fmts[] = {
+        AV_PIX_FMT_BGR24,
+        AV_PIX_FMT_NONE
+    };
+    return ff_set_common_formats(ctx, ff_make_format_list(pix_fmts));
 }
 
 
@@ -151,7 +148,8 @@ static IplImage* avframe2image(const AVFrame *frame, enum AVPixelFormat pixfmt)
 
 static int64 haming_distance(uint64_t hash1, uint64_t hash2) 
 {
-    int64 dist = 0, val = hash1 ^ hash2;
+    int64_t dist = 0;
+    int64_t val = hash1 ^ hash2;
     // Count the number of set bits
     while(val) {
         ++dist; 
@@ -160,44 +158,44 @@ static int64 haming_distance(uint64_t hash1, uint64_t hash2)
     return dist;
 }
 
-static uint64_t calc_image_phash(IplImage *image)
+static uint64_t calc_image_phash(IplImage *img)
 {
     const int DCT_SIZE = 32;
     const int ROI_SIZE = 8;
-    
-    int x = 0, y = 0, i = 0;
+
+    int x = 0, y = 0;
     double avg = 0;
     uint64_t phash = 0, phash_mask = 1;
-    
+
     IplImage *mono = NULL;
     IplImage *small = NULL;
     CvMat *dct = NULL;
-    CvMat roi;
 
-    mono  = cvCreateImage(cvSize(image->width, image->height), image->depth, 1);
-    if (image->nChannels == 1) {
-        cvCopy(image, mono, 0);
-    } else {
-        cvCvtColor(image, mono, CV_RGB2GRAY);
+    mono  = cvCreateImage(cvSize(img->width, img->height), img->depth, 1);
+    small = cvCreateImage(cvSize(DCT_SIZE, DCT_SIZE), img->depth, 1);
+
+    if (img->nChannels == 1) {
+        cvCopy(img, mono, 0);
+    } else { 
+        cvCvtColor(img, mono, CV_RGB2GRAY);
     }
 
-    small = cvCreateImage(cvSize(DCT_SIZE, DCT_SIZE), image->depth, 1);
     cvResize(mono, small, CV_INTER_CUBIC);
 
     dct = cvCreateMat(DCT_SIZE, DCT_SIZE, CV_32FC1);
     cvConvertScale(small, dct, 1.0/255.0, 0.0);
-
-    cvGetSubRect(dct, &roi, cvRect(0, 0, ROI_SIZE, ROI_SIZE));
+   
+    cvDCT(dct, dct, CV_DXT_ROWS);
+    
     avg = cvAvg(dct, NULL).val[0];
 
-    for (x = ROI_SIZE - 1; x >= 0; x--) {
-        for (y = ROI_SIZE - 1; y >= 0; y--) {
+    for (x = ROI_SIZE-1; x >= 0; x--) {
+        for (y = ROI_SIZE-1; y >= 0; y--) {
             if (cvGet2D(dct, x, y).val[0] > avg)
                 phash |= phash_mask;
-            phash_mask = phash_mask << 1ull;
+            phash_mask = phash_mask << 1;
         }
     }
-
     cvReleaseMat(&dct);
     cvReleaseImage(&mono);
     cvReleaseImage(&small);
@@ -205,58 +203,14 @@ static uint64_t calc_image_phash(IplImage *image)
     return phash;
 }
 
-static uint64_t calc_image_hash(IplImage *image)
-{
-    uint64_t hash = 0;
-    CvSize size_img = cvSize(8, 8);
-    CvScalar average;
-    int i = 0;
-    
-    IplImage *res = cvCreateImage(size_img, image->depth, image->nChannels);
-    IplImage *gray = cvCreateImage(size_img, IPL_DEPTH_8U, 1);
-    IplImage *bin = cvCreateImage(size_img, IPL_DEPTH_8U, 1);
-
-    // resize image
-    cvResize(image, res, CV_INTER_LINEAR);
-    
-    // to gray
-    cvCvtColor(res, gray, CV_BGR2GRAY);
-    // среднее-арифметическое
-    average = cvAvg(gray, NULL);
-
-    // получим бинарное изображение относительно среднего
-    // для этого воспользуемся пороговым преобразованием
-    cvThreshold(gray, bin, average.val[0], 255, CV_THRESH_BINARY);
-
-    // пробегаемся по всем пикселям изображения
-    for( int y=0; y<bin->height; y++ ) {
-        uchar* ptr = (uchar*) (bin->imageData + y * bin->widthStep);
-        for( int x=0; x<bin->width; x++ ) {
-            // 1 канал
-            if(ptr[x]){
-                hash |= 1ull<<i;  // warning C4334: '<<' : result of 32-bit shift implicitly converted to 64 bits (was 64-bit shift intended?)
-                //hash |= 1i64<<i; 
-            }
-            i++;
-        }
-    }
-    cvReleaseImage(&res);
-    cvReleaseImage(&gray);
-    cvReleaseImage(&bin);
-    return hash;
-}
-
-
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
-    av_log(NULL, AV_LOG_INFO, "FILTER_FRAME");
-    
     AVFilterContext *ctx = inlink->dst;
-    ColorbarContext *colorbar = ctx->priv;
+    ColorbarContext *option = ctx->priv;
     AVFilterLink *outlink = ctx->outputs[0];
     AVFrame *out = NULL;
     int direct = 0;
-    uint64_t hash_img = 0, calc_hash = 0;
+    uint64_t hash_img = 0, distance = 0;
     IplImage *img = NULL;
 
     if (av_frame_is_writable(in)) {
@@ -270,16 +224,15 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         }
         av_frame_copy_props(out, in);
     }
-    
     img = avframe2image(in, AV_PIX_FMT_BGR24);
-    //if (img != NULL) {
+
+    if (img != NULL) {
         hash_img = calc_image_phash(img);
-        calc_hash = haming_distance(hash_img, colorbar->hash);
-
-        av_log(NULL, AV_LOG_INFO, "hash = %llu\n", calc_hash);
-
-        av_log(NULL, AV_LOG_INFO, "calc hash = %llu\n", calc_hash);
-    //}
+        distance = haming_distance(hash_img, option->hash);
+        if (distance <= option->threshold) {
+            av_log(NULL, AV_LOG_ERROR, "Colorbar detect! Distance = %lu\n", distance);
+        }
+    }
     if (!direct)
         av_frame_free(&in);
     return ff_filter_frame(outlink, out);    
@@ -287,19 +240,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
 static av_cold void uninit(AVFilterContext *ctx)
 {
-    /*
-    int p;
-    ColorbarContext *colorbar = ctx->priv;
-
-    for (p = 0; p < colorbar->nb_planes; p++) {
-        struct plane_info *plane = &colorbar->planes[p];
-        av_freep(&plane->tmpbuf);
-        av_freep(&plane->gradients);
-        av_freep(&plane->directions);
-    }
-    */
 }
-
+ 
 static const AVFilterPad colorbar_inputs[] = {
     {
         .name         = "default",
