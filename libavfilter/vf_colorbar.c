@@ -232,6 +232,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         if (distance <= option->threshold) {
             av_log(NULL, AV_LOG_ERROR, "Colorbar detect! Distance = %lu\n", distance);
         }
+        cvReleaseImageHeader(&img);
     }
     if (!direct)
         av_frame_free(&in);
