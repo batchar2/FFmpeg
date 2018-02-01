@@ -63,8 +63,7 @@ typedef struct ColorbarContext {
 
 static const AVOption colorbar_options[] = {
    {"file", "path to colorbars", offsetof(ColorbarContext, file), AV_OPT_TYPE_STRING},
-   {"method", "math method", offsetof(ColorbarContext, method_name), AV_OPT_TYPE_STRING},
-   {"threshold", "threshold value", offsetof(ColorbarContext, threshold), AV_OPT_TYPE_INT, { .i64 = -1 }, 0, 64},
+   //{"threshold", "threshold value", offsetof(ColorbarContext, threshold), AV_OPT_TYPE_INT, { .i64 = -1 }, 0, 64},
    {NULL}
 };
 
@@ -78,26 +77,29 @@ static uint64_t calc_image_phash(IplImage *image);
 static av_cold int init(AVFilterContext *ctx)
 {    
     IplImage *colorbar_img = NULL;
-    ColorbarContext *colorbar = ctx->priv;
+    ColorbarContext *option = ctx->priv;
 
-    if (colorbar->file == NULL) {
+    //if (option->threshold == -1) {
+    //    av_log(NULL, AV_LOG_ERROR, "Colorbar option error! Not set option \"threshold\"!\n");
+    //    return -1;
+    //}
+
+    if (option->file == NULL) {
         av_log(NULL, AV_LOG_ERROR, "Colorbar file not defined! Use option: file\n");
-        return 1;
+        return -1;
     } 
     
-    colorbar_img = cvLoadImage(colorbar->file, 1);
+    colorbar_img = cvLoadImage(option->file, 1);
     if (colorbar_img == NULL) {
         av_log(NULL, AV_LOG_ERROR, "Colorbar file not found!\n");
-        return 1;
+        return -1;
     }
-    //if (colorbar->method == METHOD_HASH) {
-        colorbar->hash = calc_image_phash(colorbar_img);
-    //} else {
-    //    colorbar->hash = calc_image_hash(colorbar_img);
-    //}
+
+    option->hash = calc_image_phash(colorbar_img);
+
     cvReleaseImage(&colorbar_img);
 
-    av_log(NULL, AV_LOG_ERROR, "hash_colorbar = %llu\n", colorbar->hash);
+    av_log(NULL, AV_LOG_ERROR, "hash_colorbar = %llu\n", option->hash);
     return 0;
 }
 
@@ -115,22 +117,6 @@ static int query_formats(AVFilterContext *ctx)
 
 static int config_props(AVFilterLink *inlink)
 {
-    /*
-    int p;
-    AVFilterContext *ctx = inlink->dst;
-    ColorbarContext *colorbar = ctx->priv;
-
-    colorbar->nb_planes = inlink->format == AV_PIX_FMT_GRAY8 ? 1 : 3;
-    for (p = 0; p < colorbar->nb_planes; p++) {
-        struct plane_info *plane = &colorbar->planes[p];
-
-        plane->tmpbuf     = av_malloc(inlink->w * inlink->h);
-        plane->gradients  = av_calloc(inlink->w * inlink->h, sizeof(*plane->gradients));
-        plane->directions = av_malloc(inlink->w * inlink->h);
-        if (!plane->tmpbuf || !plane->gradients || !plane->directions)
-            return AVERROR(ENOMEM);
-    }
-    */
     return 0;
 }
 
@@ -176,75 +162,45 @@ static int64 haming_distance(uint64_t hash1, uint64_t hash2)
 
 static uint64_t calc_image_phash(IplImage *image)
 {
-    int x = 0, y = 0;
+    const int DCT_SIZE = 32;
+    const int ROI_SIZE = 8;
+    
+    int x = 0, y = 0, i = 0;
     double avg = 0;
     uint64_t phash = 0, phash_mask = 1;
-    const int DCT_SIZE = 64;
     
     IplImage *mono = NULL;
     IplImage *small = NULL;
     CvMat *dct = NULL;
     CvMat roi;
-    /*
-    // #1
-    small = cvCreateImage(cvSize(DCT_SIZE, DCT_SIZE), image->depth, 1);
+
+    mono  = cvCreateImage(cvSize(image->width, image->height), image->depth, 1);
     if (image->nChannels == 1) {
         cvCopy(image, mono, 0);
-    } else { 
+    } else {
         cvCvtColor(image, mono, CV_RGB2GRAY);
     }
-    // #2
-    mono = cvCreateImage(cvSize(small->width, small->height), small->depth, 1);
-    // #3
-    dct = cvCreateMat(DCT_SIZE, DCT_SIZE, CV_64FC1);
-    cvConvertScale(small, dct, 1, 0);
-    cvDCT(dct, dct, CV_DXT_ROWS);
-    cvGetSubRect(dct, &roi, cvRect(0, 0, 8, 8));    
 
-    avg = cvAvg(&roi, 0).val[0] * 64.0 / 63.0;
+    small = cvCreateImage(cvSize(DCT_SIZE, DCT_SIZE), image->depth, 1);
+    cvResize(mono, small, CV_INTER_CUBIC);
 
-    for (x = 7; x >= 0; x--) {
-        for (y = 7; y >= 0; y--) {
+    dct = cvCreateMat(DCT_SIZE, DCT_SIZE, CV_32FC1);
+    cvConvertScale(small, dct, 1.0/255.0, 0.0);
+
+    cvGetSubRect(dct, &roi, cvRect(0, 0, ROI_SIZE, ROI_SIZE));
+    avg = cvAvg(dct, NULL).val[0];
+
+    for (x = ROI_SIZE - 1; x >= 0; x--) {
+        for (y = ROI_SIZE - 1; y >= 0; y--) {
             if (cvGet2D(dct, x, y).val[0] > avg)
                 phash |= phash_mask;
             phash_mask = phash_mask << 1ull;
-        }
-    }
-    return phash_mask;
-    */
-    mono = cvCreateImage(cvSize(image->width, image->height), image->depth, 1);
-    small = cvCreateImage(cvSize(DCT_SIZE, DCT_SIZE), image->depth, 1);
-    
-    if (image->nChannels == 1) {
-        cvCopy(image, mono, 0);
-    } else { 
-        cvCvtColor(image, mono, CV_RGB2GRAY);
-    }
-    dct = cvCreateMat(DCT_SIZE, DCT_SIZE, CV_64FC1);
-    
-    cvConvertScale(small, dct, 1, 0);
-    cvTranspose(dct, dct);
-    cvDCT(dct, dct, CV_DXT_ROWS);
-    cvSet2D(dct, 0, 0, cvScalarAll(0));
-
-
-    cvGetSubRect(dct, &roi, cvRect(0, 0, 8, 8));
-    avg = cvAvg(&roi, 0).val[0] * 64.0 / 63.0;
-
-    for (x = 7; x >= 0; x--) {
-        for (y = 7; y >= 0; y--) {
-            if (cvGet2D(dct, x, y).val[0] > avg)
-                phash |= phash_mask;
-            phash_mask = phash_mask << 1;
         }
     }
 
     cvReleaseMat(&dct);
     cvReleaseImage(&mono);
     cvReleaseImage(&small);
-    
-
-    av_log(NULL, AV_LOG_ERROR, "phash_colorbar = %llu\n", phash);
 
     return phash;
 }
@@ -293,6 +249,8 @@ static uint64_t calc_image_hash(IplImage *image)
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 {
+    av_log(NULL, AV_LOG_INFO, "FILTER_FRAME");
+    
     AVFilterContext *ctx = inlink->dst;
     ColorbarContext *colorbar = ctx->priv;
     AVFilterLink *outlink = ctx->outputs[0];
@@ -314,17 +272,14 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     }
     
     img = avframe2image(in, AV_PIX_FMT_BGR24);
-    if (img != NULL) {
-        
-        //if (colorbar->method == METHOD_HASH) {
-            hash_img = calc_image_phash(img);
-        //} else {
-        //    hash_img = calc_image_hash(img);
-        //}
+    //if (img != NULL) {
+        hash_img = calc_image_phash(img);
         calc_hash = haming_distance(hash_img, colorbar->hash);
-        //av_log(NULL, AV_LOG_ERROR, "calc_hash = %llu\n", calc_hash);    
-        //cvReleaseImageHeader(img);
-    }
+
+        av_log(NULL, AV_LOG_INFO, "hash = %llu\n", calc_hash);
+
+        av_log(NULL, AV_LOG_INFO, "calc hash = %llu\n", calc_hash);
+    //}
     if (!direct)
         av_frame_free(&in);
     return ff_filter_frame(outlink, out);    
